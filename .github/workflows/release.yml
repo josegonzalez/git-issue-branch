@@ -21,7 +21,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -98,7 +98,7 @@ jobs:
           echo "sha256_arm64=${ARM64}" >> "$GITHUB_OUTPUT"
 
       - name: Checkout homebrew-repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: josegonzalez/homebrew-repo
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
