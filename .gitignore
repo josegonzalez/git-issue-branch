@@ -1,0 +1,4 @@
+git-issue-branch
+dist/
+.DS_Store
+coverage.out
