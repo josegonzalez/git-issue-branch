@@ -27,6 +27,7 @@ Creates a branch named `{issue_number}-{hyphenated-title}` from the GitHub issue
 ### Flags
 
 ```text
+-b, --base     base branch to create from (default: auto-detected)
 -n, --dry-run  print branch name without creating it
 -r, --remote   git remote to use (default "origin")
 -t, --token    GitHub API token (overrides GITHUB_TOKEN)
