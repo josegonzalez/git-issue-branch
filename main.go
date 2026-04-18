@@ -115,8 +115,21 @@ func fetchIssue(baseURL, owner, repo string, number int, token string) (string, 
 }
 
 func getDefaultBranch(remoteName string) string {
-	// 1. Remote HEAD symref (set after clone)
-	out, err := exec.Command("git", "symbolic-ref", fmt.Sprintf("refs/remotes/%s/HEAD", remoteName)).Output()
+	// 1. Query the remote directly for its HEAD (avoids stale local symrefs)
+	out, err := exec.Command("git", "ls-remote", "--symref", remoteName, "HEAD").Output()
+	if err == nil {
+		for _, line := range strings.Split(string(out), "\n") {
+			if strings.HasPrefix(line, "ref: refs/heads/") {
+				ref := strings.TrimPrefix(line, "ref: refs/heads/")
+				if i := strings.Index(ref, "\t"); i >= 0 {
+					return ref[:i]
+				}
+			}
+		}
+	}
+
+	// 2. Fall back to local symref (works offline)
+	out, err = exec.Command("git", "symbolic-ref", fmt.Sprintf("refs/remotes/%s/HEAD", remoteName)).Output()
 	if err == nil {
 		ref := strings.TrimSpace(string(out))
 		if i := strings.LastIndex(ref, "/"); i >= 0 {
@@ -142,6 +155,35 @@ func getDefaultBranch(remoteName string) string {
 	return "main"
 }
 
+func resolveBaseRef(remoteName, baseBranch string) (string, error) {
+	if baseBranch != "" {
+		remoteRef := remoteName + "/" + baseBranch
+		if exec.Command("git", "rev-parse", "--verify", remoteRef).Run() == nil {
+			return remoteRef, nil
+		}
+		if exec.Command("git", "rev-parse", "--verify", baseBranch).Run() == nil {
+			return baseBranch, nil
+		}
+		return "", fmt.Errorf("base branch %q not found (tried %q and %q)", baseBranch, remoteRef, baseBranch)
+	}
+
+	defaultBranch := getDefaultBranch(remoteName)
+	remoteRef := remoteName + "/" + defaultBranch
+	if exec.Command("git", "rev-parse", "--verify", remoteRef).Run() == nil {
+		return remoteRef, nil
+	}
+	if exec.Command("git", "rev-parse", "--verify", defaultBranch).Run() == nil {
+		return defaultBranch, nil
+	}
+	for _, fallback := range []string{"main", "master"} {
+		ref := remoteName + "/" + fallback
+		if exec.Command("git", "rev-parse", "--verify", ref).Run() == nil {
+			return ref, nil
+		}
+	}
+	return "", fmt.Errorf("could not determine base branch; use --base to specify one")
+}
+
 func resolveToken(flagToken string) string {
 	if flagToken != "" {
 		return flagToken
@@ -155,6 +197,7 @@ func main() {
 		flag.PrintDefaults()
 	}
 	remote := flag.StringP("remote", "r", "origin", "git remote to use")
+	base := flag.StringP("base", "b", "", "base branch to create the new branch from")
 	token := flag.StringP("token", "t", "", "GitHub API token (overrides GITHUB_TOKEN env var)")
 	dryRun := flag.BoolP("dry-run", "n", false, "print branch name without creating it")
 	version := flag.BoolP("version", "v", false, "print version")
@@ -209,8 +252,12 @@ func main() {
 		return
 	}
 
-	defaultBranch := getDefaultBranch(*remote)
-	cmd := exec.Command("git", "checkout", "-b", branch, defaultBranch)
+	baseRef, err := resolveBaseRef(*remote, *base)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	cmd := exec.Command("git", "checkout", "-b", branch, baseRef)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {

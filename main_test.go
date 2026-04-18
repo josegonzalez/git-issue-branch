@@ -389,6 +389,120 @@ func TestGetDefaultBranchFallbackMain(t *testing.T) {
 	}
 }
 
+func setupTestRepoWithRemote(t *testing.T) string {
+	t.Helper()
+	dir := setupTestRepo(t)
+	remoteDir := t.TempDir()
+
+	cmd := exec.Command("git", "clone", "--bare", dir, remoteDir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("bare clone: %v\n%s", err, out)
+	}
+
+	cmd = exec.Command("git", "remote", "add", "origin", remoteDir)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("add remote: %v\n%s", err, out)
+	}
+
+	cmd = exec.Command("git", "fetch", "origin")
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("fetch: %v\n%s", err, out)
+	}
+
+	return dir
+}
+
+func TestResolveBaseRefUsesRemoteQualified(t *testing.T) {
+	dir := setupTestRepoWithRemote(t)
+
+	origDir, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(origDir)
+
+	ref, err := resolveBaseRef("origin", "")
+	if err != nil {
+		t.Fatalf("resolveBaseRef() error = %v", err)
+	}
+	if ref != "origin/main" {
+		t.Errorf("resolveBaseRef() = %q, want %q", ref, "origin/main")
+	}
+}
+
+func TestResolveBaseRefNoLocalBranch(t *testing.T) {
+	dir := setupTestRepoWithRemote(t)
+
+	// Delete local main branch (detach HEAD first)
+	cmd := exec.Command("git", "checkout", "--detach")
+	cmd.Dir = dir
+	cmd.Run()
+	cmd = exec.Command("git", "branch", "-D", "main")
+	cmd.Dir = dir
+	cmd.Run()
+
+	origDir, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(origDir)
+
+	ref, err := resolveBaseRef("origin", "")
+	if err != nil {
+		t.Fatalf("resolveBaseRef() error = %v", err)
+	}
+	if ref != "origin/main" {
+		t.Errorf("resolveBaseRef() = %q, want %q", ref, "origin/main")
+	}
+}
+
+func TestResolveBaseRefWithExplicitBase(t *testing.T) {
+	dir := setupTestRepoWithRemote(t)
+
+	origDir, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(origDir)
+
+	ref, err := resolveBaseRef("origin", "main")
+	if err != nil {
+		t.Fatalf("resolveBaseRef() error = %v", err)
+	}
+	if ref != "origin/main" {
+		t.Errorf("resolveBaseRef() = %q, want %q", ref, "origin/main")
+	}
+}
+
+func TestResolveBaseRefInvalidBase(t *testing.T) {
+	dir := setupTestRepoWithRemote(t)
+
+	origDir, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(origDir)
+
+	_, err := resolveBaseRef("origin", "nonexistent")
+	if err == nil {
+		t.Fatal("resolveBaseRef() expected error for nonexistent base, got nil")
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("resolveBaseRef() error = %q, want error containing 'not found'", err)
+	}
+}
+
+func TestResolveBaseRefFallbackLocal(t *testing.T) {
+	dir := setupTestRepo(t)
+
+	origDir, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(origDir)
+
+	// No remote configured, should fall back to local "main"
+	ref, err := resolveBaseRef("origin", "")
+	if err != nil {
+		t.Fatalf("resolveBaseRef() error = %v", err)
+	}
+	if ref != "main" {
+		t.Errorf("resolveBaseRef() = %q, want %q", ref, "main")
+	}
+}
+
 func TestResolveToken(t *testing.T) {
 	// Flag takes priority
 	got := resolveToken("flag-token")
