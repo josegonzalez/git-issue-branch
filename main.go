@@ -257,7 +257,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	cmd := exec.Command("git", "checkout", "-b", branch, baseRef)
+	cmd := exec.Command("git", "checkout", "-b", branch, "--no-track", baseRef)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {

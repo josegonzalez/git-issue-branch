@@ -503,6 +503,36 @@ func TestResolveBaseRefFallbackLocal(t *testing.T) {
 	}
 }
 
+func TestCheckoutNoTrack(t *testing.T) {
+	dir := setupTestRepoWithRemote(t)
+
+	origDir, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(origDir)
+
+	// Create a branch the same way main.go does: git checkout -b <branch> --no-track <baseRef>
+	cmd := exec.Command("git", "checkout", "-b", "42-test-feature", "--no-track", "origin/main")
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("checkout: %v\n%s", err, out)
+	}
+
+	// Verify no upstream tracking is configured
+	cmd = exec.Command("git", "config", "branch.42-test-feature.remote")
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Errorf("expected no tracking remote, but got %q", strings.TrimSpace(string(out)))
+	}
+
+	cmd = exec.Command("git", "config", "branch.42-test-feature.merge")
+	cmd.Dir = dir
+	out, err = cmd.CombinedOutput()
+	if err == nil {
+		t.Errorf("expected no tracking merge ref, but got %q", strings.TrimSpace(string(out)))
+	}
+}
+
 func TestResolveToken(t *testing.T) {
 	// Flag takes priority
 	got := resolveToken("flag-token")
