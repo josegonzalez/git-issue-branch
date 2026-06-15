@@ -41,9 +41,11 @@ Token resolution order:
 
 1. `--token` flag
 2. `GITHUB_TOKEN` environment variable
-3. `~/.netrc` entry for `api.github.com`
+3. `GH_TOKEN` environment variable
+4. `~/.netrc` entry for `api.github.com` (token in the `password` field)
+5. `gh auth token` (the `gh` CLI's stored credential, if logged in via `gh`)
 
-No token is required for public repositories. For private repositories, provide a token with the `repo` scope.
+No token is required for public repositories. For private repositories, provide a token with the `repo` scope, which is satisfied automatically via `~/.netrc` or when logged in via `gh`.
 
 ## License
 
