@@ -618,3 +618,285 @@ func TestNetrcTokenFromFile(t *testing.T) {
 		}
 	})
 }
+
+func TestDetectProvider(t *testing.T) {
+	tests := []struct {
+		arg     string
+		want    issueProvider
+		wantErr bool
+	}{
+		{"42", providerGitHub, false},
+		{"ENG-123", providerLinear, false},
+		{"eng-123", providerLinear, false},
+		{"https://linear.app/acme/issue/ENG-123/some-slug", providerLinear, false},
+		{"https://linear.app/acme/issue/ENG-123", providerLinear, false},
+		{"not-an-issue", 0, true},
+		{"", 0, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.arg, func(t *testing.T) {
+			got, err := detectProvider(tt.arg)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("detectProvider(%q) error = %v, wantErr %v", tt.arg, err, tt.wantErr)
+			}
+			if !tt.wantErr && got != tt.want {
+				t.Errorf("detectProvider(%q) = %v, want %v", tt.arg, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseLinearIdentifier(t *testing.T) {
+	tests := []struct {
+		arg     string
+		want    string
+		wantErr bool
+	}{
+		{"https://linear.app/acme/issue/ENG-123/some-slug", "ENG-123", false},
+		{"https://linear.app/acme/issue/eng-123", "ENG-123", false},
+		{"ENG-123", "ENG-123", false},
+		{"eng-123", "ENG-123", false},
+		{"not-an-issue", "", true},
+		{"42", "", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.arg, func(t *testing.T) {
+			got, err := parseLinearIdentifier(tt.arg)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("parseLinearIdentifier(%q) error = %v, wantErr %v", tt.arg, err, tt.wantErr)
+			}
+			if got != tt.want {
+				t.Errorf("parseLinearIdentifier(%q) = %q, want %q", tt.arg, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestLinearBranchName(t *testing.T) {
+	tests := []struct {
+		name       string
+		username   string
+		identifier string
+		title      string
+		want       string
+	}{
+		{"with username", "jose", "ENG-123", "feat: Add login page", "jose/eng-123/add-login-page"},
+		{"empty username omits segment", "", "ENG-123", "feat: Add login page", "eng-123/add-login-page"},
+		{"username sanitized", "Jose Diaz", "ABC-7", "Fix bug", "jose-diaz/abc-7/fix-bug"},
+		{"lowercase identifier input", "jose", "eng-9", "Simple title", "jose/eng-9/simple-title"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := linearBranchName(tt.username, tt.identifier, tt.title)
+			if got != tt.want {
+				t.Errorf("linearBranchName(%q, %q, %q) = %q, want %q", tt.username, tt.identifier, tt.title, got, tt.want)
+			}
+			if len(got) > 240 {
+				t.Errorf("branch name exceeds 240 chars: len=%d", len(got))
+			}
+			if strings.Contains(got, "--") {
+				t.Errorf("branch name contains consecutive dashes: %q", got)
+			}
+			if strings.HasPrefix(got, "-") || strings.HasSuffix(got, "-") || strings.HasSuffix(got, "/") {
+				t.Errorf("branch name has leading/trailing dash or trailing slash: %q", got)
+			}
+		})
+	}
+}
+
+func TestFetchLinearIssue(t *testing.T) {
+	var gotAuth, gotContentType string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotContentType = r.Header.Get("Content-Type")
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"data":{"issue":{"identifier":"ENG-123","title":"feat: do thing"}}}`)
+	}))
+	defer server.Close()
+
+	issue, err := fetchLinearIssue(server.URL, "ENG-123", "lin_api_test")
+	if err != nil {
+		t.Fatalf("fetchLinearIssue() error = %v", err)
+	}
+	if issue.Identifier != "ENG-123" || issue.Title != "feat: do thing" {
+		t.Errorf("fetchLinearIssue() = %+v, want identifier ENG-123 title 'feat: do thing'", issue)
+	}
+	if gotAuth != "lin_api_test" {
+		t.Errorf("Authorization header = %q, want raw token without Bearer", gotAuth)
+	}
+	if gotContentType != "application/json" {
+		t.Errorf("Content-Type header = %q, want application/json", gotContentType)
+	}
+}
+
+func TestFetchLinearIssueErrors(t *testing.T) {
+	t.Run("errors array with HTTP 200", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"errors":[{"message":"Entity not found"}]}`)
+		}))
+		defer server.Close()
+
+		_, err := fetchLinearIssue(server.URL, "ENG-999", "lin_api_test")
+		if err == nil || !strings.Contains(err.Error(), "Entity not found") {
+			t.Errorf("fetchLinearIssue() error = %v, want containing 'Entity not found'", err)
+		}
+	})
+
+	t.Run("null issue", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"data":{"issue":null}}`)
+		}))
+		defer server.Close()
+
+		_, err := fetchLinearIssue(server.URL, "ENG-999", "lin_api_test")
+		if err == nil || !strings.Contains(err.Error(), "not found") {
+			t.Errorf("fetchLinearIssue() error = %v, want containing 'not found'", err)
+		}
+	})
+
+	t.Run("non-200 status", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+		}))
+		defer server.Close()
+
+		_, err := fetchLinearIssue(server.URL, "ENG-1", "bad-token")
+		if err == nil || !strings.Contains(err.Error(), "401") {
+			t.Errorf("fetchLinearIssue() error = %v, want containing '401'", err)
+		}
+	})
+}
+
+func TestResolveLinearToken(t *testing.T) {
+	// Stub the file-based and CLI sources so precedence is tested in isolation.
+	origPlain, origTOML, origJSON, origCLI := linearPlainFileToken, linearTOMLToken, linearJSONToken, linearCLIToken
+	defer func() {
+		linearPlainFileToken, linearTOMLToken, linearJSONToken, linearCLIToken = origPlain, origTOML, origJSON, origCLI
+	}()
+	linearPlainFileToken = func() string { return "" }
+	linearTOMLToken = func() string { return "" }
+	linearJSONToken = func() string { return "" }
+	linearCLIToken = func() string { return "" }
+
+	t.Setenv("LINEAR_API_KEY", "")
+
+	// Flag takes priority.
+	if got := resolveLinearToken("flag-token"); got != "flag-token" {
+		t.Errorf("resolveLinearToken() = %q, want %q", got, "flag-token")
+	}
+
+	// Falls back to LINEAR_API_KEY.
+	t.Setenv("LINEAR_API_KEY", "env-token")
+	if got := resolveLinearToken(""); got != "env-token" {
+		t.Errorf("resolveLinearToken() = %q, want %q", got, "env-token")
+	}
+
+	// Falls back to plain token file, ahead of toml/json.
+	t.Setenv("LINEAR_API_KEY", "")
+	linearPlainFileToken = func() string { return "plain-token" }
+	linearTOMLToken = func() string { return "toml-token" }
+	linearJSONToken = func() string { return "json-token" }
+	if got := resolveLinearToken(""); got != "plain-token" {
+		t.Errorf("resolveLinearToken() = %q, want %q", got, "plain-token")
+	}
+
+	// Falls back to toml ahead of json.
+	linearPlainFileToken = func() string { return "" }
+	if got := resolveLinearToken(""); got != "toml-token" {
+		t.Errorf("resolveLinearToken() = %q, want %q", got, "toml-token")
+	}
+
+	// Falls back to json ahead of the CLI.
+	linearTOMLToken = func() string { return "" }
+	linearCLIToken = func() string { return "cli-token" }
+	if got := resolveLinearToken(""); got != "json-token" {
+		t.Errorf("resolveLinearToken() = %q, want %q", got, "json-token")
+	}
+
+	// Falls back to the linear CLI when nothing else is set.
+	linearJSONToken = func() string { return "" }
+	if got := resolveLinearToken(""); got != "cli-token" {
+		t.Errorf("resolveLinearToken() = %q, want %q", got, "cli-token")
+	}
+
+	// Empty when no source provides a token.
+	linearCLIToken = func() string { return "" }
+	if got := resolveLinearToken(""); got != "" {
+		t.Errorf("resolveLinearToken() = %q, want empty", got)
+	}
+}
+
+func TestLinearTokenFromPlainFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "token")
+	if err := os.WriteFile(path, []byte("lin_api_plain\n"), 0600); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+	if got := linearTokenFromPlainFile(path); got != "lin_api_plain" {
+		t.Errorf("linearTokenFromPlainFile() = %q, want %q", got, "lin_api_plain")
+	}
+	if got := linearTokenFromPlainFile(filepath.Join(dir, "missing")); got != "" {
+		t.Errorf("linearTokenFromPlainFile(missing) = %q, want empty", got)
+	}
+}
+
+func TestLinearTokenFromJSON(t *testing.T) {
+	dir := t.TempDir()
+
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"token":"lin_api_json"}`), 0600); err != nil {
+		t.Fatalf("write json: %v", err)
+	}
+	if got := linearTokenFromJSON(path); got != "lin_api_json" {
+		t.Errorf("linearTokenFromJSON() = %q, want %q", got, "lin_api_json")
+	}
+
+	altPath := filepath.Join(dir, "alt.json")
+	if err := os.WriteFile(altPath, []byte(`{"api_key":"lin_api_alt"}`), 0600); err != nil {
+		t.Fatalf("write json: %v", err)
+	}
+	if got := linearTokenFromJSON(altPath); got != "lin_api_alt" {
+		t.Errorf("linearTokenFromJSON(api_key) = %q, want %q", got, "lin_api_alt")
+	}
+
+	noKeyPath := filepath.Join(dir, "nokey.json")
+	if err := os.WriteFile(noKeyPath, []byte(`{"workspace":"acme"}`), 0600); err != nil {
+		t.Fatalf("write json: %v", err)
+	}
+	if got := linearTokenFromJSON(noKeyPath); got != "" {
+		t.Errorf("linearTokenFromJSON(no key) = %q, want empty", got)
+	}
+
+	if got := linearTokenFromJSON(filepath.Join(dir, "missing.json")); got != "" {
+		t.Errorf("linearTokenFromJSON(missing) = %q, want empty", got)
+	}
+}
+
+func TestLinearTokenFromTOML(t *testing.T) {
+	dir := t.TempDir()
+
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(path, []byte("api_key = \"lin_api_toml\"\n"), 0600); err != nil {
+		t.Fatalf("write toml: %v", err)
+	}
+	if got := linearTokenFromTOML(path); got != "lin_api_toml" {
+		t.Errorf("linearTokenFromTOML() = %q, want %q", got, "lin_api_toml")
+	}
+
+	noKeyPath := filepath.Join(dir, "nokey.toml")
+	if err := os.WriteFile(noKeyPath, []byte("default = \"acme\"\n"), 0600); err != nil {
+		t.Fatalf("write toml: %v", err)
+	}
+	if got := linearTokenFromTOML(noKeyPath); got != "" {
+		t.Errorf("linearTokenFromTOML(no key) = %q, want empty", got)
+	}
+
+	if got := linearTokenFromTOML(filepath.Join(dir, "missing.toml")); got != "" {
+		t.Errorf("linearTokenFromTOML(missing) = %q, want empty", got)
+	}
+}
