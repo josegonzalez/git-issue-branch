@@ -99,7 +99,7 @@ func sanitizeSegment(segment string) string {
 }
 
 var linearIdentRe = regexp.MustCompile(`^[A-Za-z]+-\d+$`)
-var linearURLRe = regexp.MustCompile(`^https?://linear\.app/[^/]+/issue/([A-Za-z]+-\d+)`)
+var linearURLRe = regexp.MustCompile(`^https?://linear\.app/[^/]+/issue/([A-Za-z]+-\d+)(?:/([^/?#]+))?`)
 
 type issueProvider int
 
@@ -134,6 +134,17 @@ func parseLinearIdentifier(arg string) (string, error) {
 		return strings.ToUpper(arg), nil
 	}
 	return "", fmt.Errorf("invalid Linear identifier: %s", arg)
+}
+
+// parseLinearURL extracts the identifier and the optional title slug from a
+// linear.app issue URL. ok is false when arg is not a Linear URL; title is
+// empty when the URL has no title segment (e.g. .../issue/ENG-123).
+func parseLinearURL(arg string) (identifier, title string, ok bool) {
+	m := linearURLRe.FindStringSubmatch(arg)
+	if m == nil {
+		return "", "", false
+	}
+	return strings.ToUpper(m[1]), m[2], true
 }
 
 func parseGitRemote(remoteURL string) (string, string, error) {
@@ -537,6 +548,12 @@ func resolveGitHubBranch(arg, remote, flagToken string) string {
 // resolveLinearBranch fetches a Linear issue and returns its branch name,
 // exiting on failure.
 func resolveLinearBranch(arg, flagToken string) string {
+	// A full URL that already includes the title slug is enough to build the
+	// branch name offline, without a token or a network request.
+	if identifier, title, ok := parseLinearURL(arg); ok && title != "" {
+		return linearBranchName(resolveLinearUsername(), identifier, title)
+	}
+
 	identifier, err := parseLinearIdentifier(arg)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)

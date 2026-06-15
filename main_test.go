@@ -674,6 +674,46 @@ func TestParseLinearIdentifier(t *testing.T) {
 	}
 }
 
+func TestParseLinearURL(t *testing.T) {
+	tests := []struct {
+		arg            string
+		wantIdentifier string
+		wantTitle      string
+		wantOK         bool
+	}{
+		{"https://linear.app/acme/issue/ENG-123/fix-the-login-bug", "ENG-123", "fix-the-login-bug", true},
+		{"https://linear.app/acme/issue/eng-123/fix", "ENG-123", "fix", true},
+		{"https://linear.app/acme/issue/ENG-123", "ENG-123", "", true},
+		{"https://linear.app/acme/issue/ENG-123/slug?foo=bar#x", "ENG-123", "slug", true},
+		{"ENG-123", "", "", false},
+		{"42", "", "", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.arg, func(t *testing.T) {
+			identifier, title, ok := parseLinearURL(tt.arg)
+			if ok != tt.wantOK {
+				t.Fatalf("parseLinearURL(%q) ok = %v, want %v", tt.arg, ok, tt.wantOK)
+			}
+			if identifier != tt.wantIdentifier || title != tt.wantTitle {
+				t.Errorf("parseLinearURL(%q) = (%q, %q), want (%q, %q)", tt.arg, identifier, title, tt.wantIdentifier, tt.wantTitle)
+			}
+		})
+	}
+}
+
+// TestLinearBranchFromURL covers the offline path: a full URL with a title slug
+// is composed into a branch name without any remote lookup.
+func TestLinearBranchFromURL(t *testing.T) {
+	identifier, title, ok := parseLinearURL("https://linear.app/acme/issue/ENG-123/fix-the-login-bug")
+	if !ok || title == "" {
+		t.Fatalf("parseLinearURL returned ok=%v title=%q, want a title slug", ok, title)
+	}
+	if got, want := linearBranchName("jose", identifier, title), "jose/eng-123/fix-the-login-bug"; got != want {
+		t.Errorf("linearBranchName = %q, want %q", got, want)
+	}
+}
+
 func TestLinearBranchName(t *testing.T) {
 	tests := []struct {
 		name       string
