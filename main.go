@@ -6,11 +6,13 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"unicode"
 
+	netrc "github.com/jdx/go-netrc"
 	flag "github.com/spf13/pflag"
 )
 
@@ -184,11 +186,57 @@ func resolveBaseRef(remoteName, baseBranch string) (string, error) {
 	return "", fmt.Errorf("could not determine base branch; use --base to specify one")
 }
 
+var ghAuthToken = func() string {
+	out, err := exec.Command("gh", "auth", "token").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+var netrcToken = func() string {
+	return netrcTokenFromFile(defaultNetrcPath())
+}
+
+func defaultNetrcPath() string {
+	if p := os.Getenv("NETRC"); p != "" {
+		return p
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".netrc")
+}
+
+func netrcTokenFromFile(path string) string {
+	if path == "" {
+		return ""
+	}
+	n, err := netrc.Parse(path)
+	if err != nil {
+		return ""
+	}
+	if m := n.Machine("api.github.com"); m != nil {
+		return m.Get("password")
+	}
+	return ""
+}
+
 func resolveToken(flagToken string) string {
 	if flagToken != "" {
 		return flagToken
 	}
-	return os.Getenv("GITHUB_TOKEN")
+	if t := os.Getenv("GITHUB_TOKEN"); t != "" {
+		return t
+	}
+	if t := os.Getenv("GH_TOKEN"); t != "" {
+		return t
+	}
+	if t := netrcToken(); t != "" {
+		return t
+	}
+	return ghAuthToken()
 }
 
 func main() {

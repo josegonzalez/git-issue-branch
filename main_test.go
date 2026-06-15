@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -534,23 +535,86 @@ func TestCheckoutNoTrack(t *testing.T) {
 }
 
 func TestResolveToken(t *testing.T) {
+	// Stub netrc and gh lookups so precedence is tested in isolation.
+	origNetrc, origGH := netrcToken, ghAuthToken
+	defer func() { netrcToken, ghAuthToken = origNetrc, origGH }()
+	netrcToken = func() string { return "" }
+	ghAuthToken = func() string { return "" }
+
 	// Flag takes priority
 	got := resolveToken("flag-token")
 	if got != "flag-token" {
 		t.Errorf("resolveToken() = %q, want %q", got, "flag-token")
 	}
 
-	// Falls back to env var
+	// Falls back to GITHUB_TOKEN
 	t.Setenv("GITHUB_TOKEN", "env-token")
 	got = resolveToken("")
 	if got != "env-token" {
 		t.Errorf("resolveToken() = %q, want %q", got, "env-token")
 	}
 
-	// Empty when neither set
+	// Falls back to GH_TOKEN ahead of netrc/gh
 	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("GH_TOKEN", "gh-env-token")
+	got = resolveToken("")
+	if got != "gh-env-token" {
+		t.Errorf("resolveToken() = %q, want %q", got, "gh-env-token")
+	}
+
+	// Falls back to netrc, ahead of gh auth token
+	t.Setenv("GH_TOKEN", "")
+	netrcToken = func() string { return "netrc-token" }
+	ghAuthToken = func() string { return "gh-token" }
+	got = resolveToken("")
+	if got != "netrc-token" {
+		t.Errorf("resolveToken() = %q, want %q", got, "netrc-token")
+	}
+
+	// Falls back to gh auth token when nothing else is set
+	netrcToken = func() string { return "" }
+	got = resolveToken("")
+	if got != "gh-token" {
+		t.Errorf("resolveToken() = %q, want %q", got, "gh-token")
+	}
+
+	// Empty when no source provides a token
+	ghAuthToken = func() string { return "" }
 	got = resolveToken("")
 	if got != "" {
 		t.Errorf("resolveToken() = %q, want empty", got)
 	}
+}
+
+func TestNetrcTokenFromFile(t *testing.T) {
+	t.Run("returns password for api.github.com", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, ".netrc")
+		content := "machine api.github.com login x password ghp_xxx\n"
+		if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+			t.Fatalf("write netrc: %v", err)
+		}
+		if got := netrcTokenFromFile(path); got != "ghp_xxx" {
+			t.Errorf("netrcTokenFromFile() = %q, want %q", got, "ghp_xxx")
+		}
+	})
+
+	t.Run("no matching machine returns empty", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, ".netrc")
+		content := "machine example.com login x password secret\n"
+		if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+			t.Fatalf("write netrc: %v", err)
+		}
+		if got := netrcTokenFromFile(path); got != "" {
+			t.Errorf("netrcTokenFromFile() = %q, want empty", got)
+		}
+	})
+
+	t.Run("nonexistent path returns empty", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "does-not-exist")
+		if got := netrcTokenFromFile(path); got != "" {
+			t.Errorf("netrcTokenFromFile() = %q, want empty", got)
+		}
+	})
 }
