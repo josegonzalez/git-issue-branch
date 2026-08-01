@@ -71,6 +71,17 @@ func sanitizeBranchName(issueNumber int, title string) string {
 	return truncateBranch(fmt.Sprintf("%d-%s", issueNumber, sanitizeTitle(title)))
 }
 
+// securityBranchName builds a branch name of the form "prefix-number-title" for
+// a GitHub security alert (e.g. "dependabot-20-..."). The title segment is
+// omitted when it sanitizes to empty, avoiding a trailing hyphen.
+func securityBranchName(prefix string, number int, title string) string {
+	branch := fmt.Sprintf("%s-%d", prefix, number)
+	if t := sanitizeTitle(title); t != "" {
+		branch += "-" + t
+	}
+	return truncateBranch(branch)
+}
+
 // linearBranchName builds a Linear branch name of the form
 // "username/eng-123/title". The username segment is omitted when empty. The
 // identifier is lowercased; the username is lightly sanitized.
@@ -100,18 +111,29 @@ func sanitizeSegment(segment string) string {
 
 var linearIdentRe = regexp.MustCompile(`^[A-Za-z]+-\d+$`)
 var linearURLRe = regexp.MustCompile(`^https?://linear\.app/[^/]+/issue/([A-Za-z]+-\d+)(?:/([^/?#]+))?`)
+var dependabotURLRe = regexp.MustCompile(`^https?://github\.com/([^/]+)/([^/]+)/security/dependabot/(\d+)`)
+var codeScanningURLRe = regexp.MustCompile(`^https?://github\.com/([^/]+)/([^/]+)/security/code-scanning/(\d+)`)
 
 type issueProvider int
 
 const (
 	providerGitHub issueProvider = iota
 	providerLinear
+	providerDependabot
+	providerCodeScanning
 )
 
-// detectProvider classifies the positional argument. A pure integer is a
-// GitHub issue number; a linear.app issue URL or a bare identifier like
-// ENG-123 is a Linear ticket.
+// detectProvider classifies the positional argument. A GitHub security alert
+// URL (dependabot or code-scanning) selects the matching provider; a pure
+// integer is a GitHub issue number; a linear.app issue URL or a bare identifier
+// like ENG-123 is a Linear ticket.
 func detectProvider(arg string) (issueProvider, error) {
+	if dependabotURLRe.MatchString(arg) {
+		return providerDependabot, nil
+	}
+	if codeScanningURLRe.MatchString(arg) {
+		return providerCodeScanning, nil
+	}
 	if linearURLRe.MatchString(arg) {
 		return providerLinear, nil
 	}
@@ -122,6 +144,17 @@ func detectProvider(arg string) (issueProvider, error) {
 		return providerLinear, nil
 	}
 	return 0, fmt.Errorf("unrecognized issue reference: %s", arg)
+}
+
+// parseAlertURL extracts the owner, repo, and alert number from a GitHub
+// security alert URL matched by re. ok is false when arg does not match.
+func parseAlertURL(re *regexp.Regexp, arg string) (owner, repo string, number int, ok bool) {
+	m := re.FindStringSubmatch(arg)
+	if m == nil {
+		return "", "", 0, false
+	}
+	n, _ := strconv.Atoi(m[3]) // regex guarantees \d+
+	return m[1], m[2], n, true
 }
 
 // parseLinearIdentifier extracts the canonical, uppercased identifier (e.g.
@@ -200,6 +233,78 @@ func fetchIssue(baseURL, owner, repo string, number int, token string) (string, 
 	}
 
 	return issue.Title, nil
+}
+
+// fetchDependabotAlert queries the GitHub REST API for a dependabot alert and
+// returns its advisory summary. This endpoint requires authentication even for
+// public repositories.
+func fetchDependabotAlert(baseURL, owner, repo string, number int, token string) (string, error) {
+	url := fmt.Sprintf("%s/repos/%s/%s/dependabot/alerts/%d", baseURL, owner, repo, number)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	if token != "" {
+		req.Header.Set("Authorization", "token "+token)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch dependabot alert: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("GitHub API returned status %d for dependabot alert #%d", resp.StatusCode, number)
+	}
+
+	var alert struct {
+		SecurityAdvisory struct {
+			Summary string `json:"summary"`
+		} `json:"security_advisory"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&alert); err != nil {
+		return "", fmt.Errorf("failed to parse dependabot alert response: %w", err)
+	}
+
+	return alert.SecurityAdvisory.Summary, nil
+}
+
+// fetchCodeScanningAlert queries the GitHub REST API for a code-scanning alert
+// and returns its rule description. This endpoint requires authentication even
+// for public repositories.
+func fetchCodeScanningAlert(baseURL, owner, repo string, number int, token string) (string, error) {
+	url := fmt.Sprintf("%s/repos/%s/%s/code-scanning/alerts/%d", baseURL, owner, repo, number)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	if token != "" {
+		req.Header.Set("Authorization", "token "+token)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch code-scanning alert: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("GitHub API returned status %d for code-scanning alert #%d", resp.StatusCode, number)
+	}
+
+	var alert struct {
+		Rule struct {
+			Description string `json:"description"`
+		} `json:"rule"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&alert); err != nil {
+		return "", fmt.Errorf("failed to parse code-scanning alert response: %w", err)
+	}
+
+	return alert.Rule.Description, nil
 }
 
 type linearIssue struct {
@@ -545,6 +650,44 @@ func resolveGitHubBranch(arg, remote, flagToken string) string {
 	return sanitizeBranchName(issueNumber, title)
 }
 
+// resolveDependabotBranch fetches a GitHub dependabot alert and returns its
+// branch name, exiting on failure. Owner and repo come from the URL, so no git
+// remote lookup is needed.
+func resolveDependabotBranch(arg, flagToken string) string {
+	owner, repo, number, ok := parseAlertURL(dependabotURLRe, arg)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "invalid dependabot alert URL: %s\n", arg)
+		os.Exit(1)
+	}
+
+	summary, err := fetchDependabotAlert("https://api.github.com", owner, repo, number, resolveToken(flagToken))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	return securityBranchName("dependabot", number, summary)
+}
+
+// resolveCodeScanningBranch fetches a GitHub code-scanning alert and returns its
+// branch name, exiting on failure. Owner and repo come from the URL, so no git
+// remote lookup is needed.
+func resolveCodeScanningBranch(arg, flagToken string) string {
+	owner, repo, number, ok := parseAlertURL(codeScanningURLRe, arg)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "invalid code-scanning alert URL: %s\n", arg)
+		os.Exit(1)
+	}
+
+	description, err := fetchCodeScanningAlert("https://api.github.com", owner, repo, number, resolveToken(flagToken))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	return securityBranchName("code-scanning", number, description)
+}
+
 // resolveLinearBranch fetches a Linear issue and returns its branch name,
 // exiting on failure.
 func resolveLinearBranch(arg, flagToken string) string {
@@ -577,7 +720,7 @@ func resolveLinearBranch(arg, flagToken string) string {
 
 func main() {
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: git issue-branch <issue-number | LINEAR-ID | linear-url>\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: git issue-branch <issue-number | LINEAR-ID | url>\n\n")
 		flag.PrintDefaults()
 	}
 	remote := flag.StringP("remote", "r", "origin", "git remote to use")
@@ -595,7 +738,7 @@ func main() {
 
 	args := flag.Args()
 	if len(args) != 1 {
-		fmt.Fprintln(os.Stderr, "usage: git-issue-branch <issue-number | LINEAR-ID | linear-url>")
+		fmt.Fprintln(os.Stderr, "usage: git-issue-branch <issue-number | LINEAR-ID | url>")
 		os.Exit(1)
 	}
 
@@ -606,9 +749,14 @@ func main() {
 	}
 
 	var branch string
-	if provider == providerLinear {
+	switch provider {
+	case providerLinear:
 		branch = resolveLinearBranch(args[0], *linearToken)
-	} else {
+	case providerDependabot:
+		branch = resolveDependabotBranch(args[0], *token)
+	case providerCodeScanning:
+		branch = resolveCodeScanningBranch(args[0], *token)
+	default:
 		branch = resolveGitHubBranch(args[0], *remote, *token)
 	}
 

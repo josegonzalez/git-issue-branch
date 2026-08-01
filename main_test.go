@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -123,6 +124,80 @@ func TestSanitizeBranchName(t *testing.T) {
 			got := sanitizeBranchName(tt.issueNumber, tt.title)
 			if got != tt.want {
 				t.Errorf("sanitizeBranchName(%d, %q) = %q, want %q", tt.issueNumber, tt.title, got, tt.want)
+			}
+
+			// Verify branch name invariants
+			if len(got) > 240 {
+				t.Errorf("branch name exceeds 240 chars: len=%d", len(got))
+			}
+			if strings.Contains(got, "--") {
+				t.Errorf("branch name contains consecutive dashes: %q", got)
+			}
+			if strings.HasPrefix(got, "-") || strings.HasSuffix(got, "-") {
+				t.Errorf("branch name has leading/trailing dash: %q", got)
+			}
+		})
+	}
+}
+
+func TestSecurityBranchName(t *testing.T) {
+	tests := []struct {
+		name   string
+		prefix string
+		number int
+		title  string
+		want   string
+	}{
+		{
+			name:   "dependabot summary",
+			prefix: "dependabot",
+			number: 20,
+			title:  "Ruby json: JSON generator heap buffer overflow when streaming to an IO",
+			want:   "dependabot-20-ruby-json-json-generator-heap-buffer-overflow-when-streaming-to-an-io",
+		},
+		{
+			name:   "code-scanning description",
+			prefix: "code-scanning",
+			number: 1,
+			title:  "Size computation for allocation may overflow",
+			want:   "code-scanning-1-size-computation-for-allocation-may-overflow",
+		},
+		{
+			name:   "empty title omits trailing hyphen",
+			prefix: "dependabot",
+			number: 5,
+			title:  "",
+			want:   "dependabot-5",
+		},
+		{
+			name:   "title sanitizing to empty omits segment",
+			prefix: "code-scanning",
+			number: 7,
+			title:  "!!!",
+			want:   "code-scanning-7",
+		},
+		{
+			name:   "long title truncated to 240",
+			prefix: "dependabot",
+			number: 1,
+			title:  strings.Repeat("a-", 200),
+			want: func() string {
+				branch := "dependabot-1-" + strings.Repeat("a-", 200)
+				branch = strings.TrimRight(branch, "-")
+				if len(branch) > 240 {
+					branch = branch[:240]
+					branch = strings.TrimRight(branch, "-/")
+				}
+				return branch
+			}(),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := securityBranchName(tt.prefix, tt.number, tt.title)
+			if got != tt.want {
+				t.Errorf("securityBranchName(%q, %d, %q) = %q, want %q", tt.prefix, tt.number, tt.title, got, tt.want)
 			}
 
 			// Verify branch name invariants
@@ -306,6 +381,86 @@ func TestFetchIssueRetryWithToken(t *testing.T) {
 	}
 	if calls != 2 {
 		t.Errorf("expected 2 calls, got %d", calls)
+	}
+}
+
+func TestFetchDependabotAlert(t *testing.T) {
+	var gotAuth string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/owner/repo/dependabot/alerts/20" {
+			http.NotFound(w, r)
+			return
+		}
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"number":20,"security_advisory":{"summary":"Ruby json: JSON generator heap buffer overflow when streaming to an IO"}}`)
+	}))
+	defer server.Close()
+
+	summary, err := fetchDependabotAlert(server.URL, "owner", "repo", 20, "ghp_test123")
+	if err != nil {
+		t.Fatalf("fetchDependabotAlert() error = %v", err)
+	}
+	if want := "Ruby json: JSON generator heap buffer overflow when streaming to an IO"; summary != want {
+		t.Errorf("fetchDependabotAlert() summary = %q, want %q", summary, want)
+	}
+	if gotAuth != "token ghp_test123" {
+		t.Errorf("Authorization header = %q, want %q", gotAuth, "token ghp_test123")
+	}
+}
+
+func TestFetchDependabotAlertNotFound(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	_, err := fetchDependabotAlert(server.URL, "owner", "repo", 999, "")
+	if err == nil {
+		t.Fatal("fetchDependabotAlert() expected error for 404, got nil")
+	}
+	if !strings.Contains(err.Error(), "404") {
+		t.Errorf("fetchDependabotAlert() error = %q, want error containing '404'", err)
+	}
+}
+
+func TestFetchCodeScanningAlert(t *testing.T) {
+	var gotAuth string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/owner/repo/code-scanning/alerts/1" {
+			http.NotFound(w, r)
+			return
+		}
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"number":1,"rule":{"id":"go/allocation-size-overflow","description":"Size computation for allocation may overflow"}}`)
+	}))
+	defer server.Close()
+
+	description, err := fetchCodeScanningAlert(server.URL, "owner", "repo", 1, "ghp_test123")
+	if err != nil {
+		t.Fatalf("fetchCodeScanningAlert() error = %v", err)
+	}
+	if want := "Size computation for allocation may overflow"; description != want {
+		t.Errorf("fetchCodeScanningAlert() description = %q, want %q", description, want)
+	}
+	if gotAuth != "token ghp_test123" {
+		t.Errorf("Authorization header = %q, want %q", gotAuth, "token ghp_test123")
+	}
+}
+
+func TestFetchCodeScanningAlertNotFound(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	_, err := fetchCodeScanningAlert(server.URL, "owner", "repo", 999, "")
+	if err == nil {
+		t.Fatal("fetchCodeScanningAlert() expected error for 404, got nil")
+	}
+	if !strings.Contains(err.Error(), "404") {
+		t.Errorf("fetchCodeScanningAlert() error = %q, want error containing '404'", err)
 	}
 }
 
@@ -630,6 +785,8 @@ func TestDetectProvider(t *testing.T) {
 		{"eng-123", providerLinear, false},
 		{"https://linear.app/acme/issue/ENG-123/some-slug", providerLinear, false},
 		{"https://linear.app/acme/issue/ENG-123", providerLinear, false},
+		{"https://github.com/dokku/docker-port-forward/security/dependabot/20", providerDependabot, false},
+		{"https://github.com/dokku/dokku/security/code-scanning/1", providerCodeScanning, false},
 		{"not-an-issue", 0, true},
 		{"", 0, true},
 	}
@@ -642,6 +799,73 @@ func TestDetectProvider(t *testing.T) {
 			}
 			if !tt.wantErr && got != tt.want {
 				t.Errorf("detectProvider(%q) = %v, want %v", tt.arg, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseAlertURL(t *testing.T) {
+	tests := []struct {
+		name       string
+		re         *regexp.Regexp
+		arg        string
+		wantOwner  string
+		wantRepo   string
+		wantNumber int
+		wantOK     bool
+	}{
+		{
+			name:       "dependabot URL",
+			re:         dependabotURLRe,
+			arg:        "https://github.com/dokku/docker-port-forward/security/dependabot/20",
+			wantOwner:  "dokku",
+			wantRepo:   "docker-port-forward",
+			wantNumber: 20,
+			wantOK:     true,
+		},
+		{
+			name:       "code-scanning URL",
+			re:         codeScanningURLRe,
+			arg:        "https://github.com/dokku/dokku/security/code-scanning/1",
+			wantOwner:  "dokku",
+			wantRepo:   "dokku",
+			wantNumber: 1,
+			wantOK:     true,
+		},
+		{
+			name:       "trailing query and fragment tolerated",
+			re:         codeScanningURLRe,
+			arg:        "https://github.com/owner/repo/security/code-scanning/42?ref=main#x",
+			wantOwner:  "owner",
+			wantRepo:   "repo",
+			wantNumber: 42,
+			wantOK:     true,
+		},
+		{
+			name:   "wrong alert type does not match",
+			re:     dependabotURLRe,
+			arg:    "https://github.com/dokku/dokku/security/code-scanning/1",
+			wantOK: false,
+		},
+		{
+			name:   "not a github alert URL",
+			re:     dependabotURLRe,
+			arg:    "https://linear.app/acme/issue/ENG-123",
+			wantOK: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			owner, repo, number, ok := parseAlertURL(tt.re, tt.arg)
+			if ok != tt.wantOK {
+				t.Fatalf("parseAlertURL(%q) ok = %v, want %v", tt.arg, ok, tt.wantOK)
+			}
+			if !tt.wantOK {
+				return
+			}
+			if owner != tt.wantOwner || repo != tt.wantRepo || number != tt.wantNumber {
+				t.Errorf("parseAlertURL(%q) = (%q, %q, %d), want (%q, %q, %d)", tt.arg, owner, repo, number, tt.wantOwner, tt.wantRepo, tt.wantNumber)
 			}
 		})
 	}

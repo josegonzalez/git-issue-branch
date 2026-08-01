@@ -1,6 +1,6 @@
 # git-issue-branch
 
-Create git branches from GitHub issue numbers or Linear tickets.
+Create git branches from GitHub issue numbers, GitHub security alerts, or Linear tickets.
 
 ## Installation
 
@@ -19,13 +19,17 @@ make install
 ## Usage
 
 ```sh
-git issue-branch <issue-number | LINEAR-ID | linear-url>
+git issue-branch <issue-number | LINEAR-ID | url>
 ```
 
 The provider is auto-detected from the argument:
 
 - A plain integer (e.g. `42`) is a GitHub issue. Creates a branch named `{issue_number}-{hyphenated-title}` from the GitHub issue title.
+- A GitHub dependabot alert URL (e.g. `https://github.com/owner/repo/security/dependabot/20`) creates a branch named `dependabot-{number}-{hyphenated-summary}` from the advisory summary.
+- A GitHub code-scanning alert URL (e.g. `https://github.com/owner/repo/security/code-scanning/1`) creates a branch named `code-scanning-{number}-{hyphenated-description}` from the rule description.
 - A Linear identifier (e.g. `ENG-123`) or a Linear issue URL (e.g. `https://linear.app/acme/issue/ENG-123/some-slug`) is a Linear ticket. Creates a branch named `{username}/{identifier}/{hyphenated-title}`.
+
+The owner and repository for a GitHub alert URL are taken from the URL itself, so the branch can be created from any local clone.
 
 Semantic commit prefixes (e.g. `feat:`, `fix(scope):`) are stripped from the title.
 
@@ -51,7 +55,9 @@ Token resolution order:
 4. `~/.netrc` entry for `api.github.com` (token in the `password` field)
 5. `gh auth token` (the `gh` CLI's stored credential, if logged in via `gh`)
 
-No token is required for public repositories. For private repositories, provide a token with the `repo` scope, which is satisfied automatically via `~/.netrc` or when logged in via `gh`.
+No token is required for public repository issues. For private repositories, provide a token with the `repo` scope, which is satisfied automatically via `~/.netrc` or when logged in via `gh`.
+
+Dependabot and code-scanning alerts are never public, so they always require a token with the `security_events` (or `repo`) scope, resolved through the same order above.
 
 ### Linear authentication
 
