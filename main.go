@@ -83,14 +83,17 @@ func securityBranchName(prefix string, number int, title string) string {
 }
 
 // linearBranchName builds a Linear branch name of the form
-// "username/eng-123/title". The username segment is omitted when empty. The
-// identifier is lowercased; the username is lightly sanitized.
+// "username/eng-123/title". The username and title segments are omitted when
+// empty. The identifier is lowercased; the username is lightly sanitized.
 func linearBranchName(username, identifier, title string) string {
 	var segments []string
 	if u := sanitizeSegment(username); u != "" {
 		segments = append(segments, u)
 	}
-	segments = append(segments, strings.ToLower(identifier), sanitizeTitle(title))
+	segments = append(segments, strings.ToLower(identifier))
+	if t := sanitizeTitle(title); t != "" {
+		segments = append(segments, t)
+	}
 	return truncateBranch(strings.Join(segments, "/"))
 }
 
@@ -688,34 +691,64 @@ func resolveCodeScanningBranch(arg, flagToken string) string {
 	return securityBranchName("code-scanning", number, description)
 }
 
-// resolveLinearBranch fetches a Linear issue and returns its branch name,
-// exiting on failure.
-func resolveLinearBranch(arg, flagToken string) string {
+// noSlugSuffix is appended to warnings when a Linear branch is created without
+// its title segment.
+const noSlugSuffix = "; creating branch without a title slug"
+
+// linearBranch returns the branch name for a Linear URL or identifier, plus a
+// warning to print when the title slug had to be omitted. The token is only
+// resolved when the title must be fetched. A URL without a slug
+// falls back to a slug-less branch when the title cannot be fetched; a bare
+// identifier returns an error instead.
+func linearBranch(baseURL, arg, username string, resolveToken func() string) (branch, warning string, err error) {
 	// A full URL that already includes the title slug is enough to build the
 	// branch name offline, without a token or a network request.
-	if identifier, title, ok := parseLinearURL(arg); ok && title != "" {
-		return linearBranchName(resolveLinearUsername(), identifier, title)
+	identifier, title, isURL := parseLinearURL(arg)
+	if isURL && title != "" {
+		return linearBranchName(username, identifier, title), "", nil
 	}
 
-	identifier, err := parseLinearIdentifier(arg)
+	identifier, err = parseLinearIdentifier(arg)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		return "", "", err
 	}
 
-	token := resolveLinearToken(flagToken)
+	token := resolveToken()
 	if token == "" {
-		fmt.Fprintln(os.Stderr, "no Linear API key found; set --linear-token or LINEAR_API_KEY")
-		os.Exit(1)
+		if isURL {
+			return linearBranchName(username, identifier, ""), "no Linear API key found" + noSlugSuffix, nil
+		}
+		return "", "", fmt.Errorf("no Linear API key found; set --linear-token or LINEAR_API_KEY")
 	}
 
-	issue, err := fetchLinearIssue("https://api.linear.app/graphql", identifier, token)
+	issue, err := fetchLinearIssue(baseURL, identifier, token)
+	if err != nil {
+		if isURL {
+			return linearBranchName(username, identifier, ""), err.Error() + noSlugSuffix, nil
+		}
+		return "", "", err
+	}
+
+	if sanitizeTitle(issue.Title) == "" {
+		warning = fmt.Sprintf("Linear issue %s has no usable title", issue.Identifier) + noSlugSuffix
+	}
+	return linearBranchName(username, issue.Identifier, issue.Title), warning, nil
+}
+
+// resolveLinearBranch fetches a Linear issue and returns its branch name,
+// printing any warning and exiting on failure.
+func resolveLinearBranch(arg, flagToken string) string {
+	branch, warning, err := linearBranch("https://api.linear.app/graphql", arg, resolveLinearUsername(), func() string {
+		return resolveLinearToken(flagToken)
+	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-
-	return linearBranchName(resolveLinearUsername(), issue.Identifier, issue.Title)
+	if warning != "" {
+		fmt.Fprintln(os.Stderr, "warning: "+warning)
+	}
+	return branch
 }
 
 func main() {

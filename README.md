@@ -27,7 +27,7 @@ The provider is auto-detected from the argument:
 - A plain integer (e.g. `42`) is a GitHub issue. Creates a branch named `{issue_number}-{hyphenated-title}` from the GitHub issue title.
 - A GitHub dependabot alert URL (e.g. `https://github.com/owner/repo/security/dependabot/20`) creates a branch named `dependabot-{number}-{hyphenated-summary}` from the advisory summary.
 - A GitHub code-scanning alert URL (e.g. `https://github.com/owner/repo/security/code-scanning/1`) creates a branch named `code-scanning-{number}-{hyphenated-description}` from the rule description.
-- A Linear identifier (e.g. `ENG-123`) or a Linear issue URL (e.g. `https://linear.app/acme/issue/ENG-123/some-slug`) is a Linear ticket. Creates a branch named `{username}/{identifier}/{hyphenated-title}`.
+- A Linear identifier (e.g. `ENG-123`) or a Linear issue URL (e.g. `https://linear.app/acme/issue/ENG-123/some-slug`) is a Linear ticket. Creates a branch named `{username}/{identifier}/{hyphenated-title}`. The title segment is omitted, with a warning, when the title cannot be determined.
 
 The owner and repository for a GitHub alert URL are taken from the URL itself, so the branch can be created from any local clone.
 
@@ -61,7 +61,7 @@ Dependabot and code-scanning alerts are never public, so they always require a t
 
 ### Linear authentication
 
-Linear has no anonymous access, so an API key is always required. Personal API keys can be created in Linear under Settings → Security & access. Key resolution order:
+Linear has no anonymous access, so fetching an issue title requires an API key. No key is needed for a Linear URL that already includes the title slug. A Linear URL without a slug falls back to `{username}/{identifier}` with a warning when no key is found or the fetch fails. A bare identifier always requires a working key. Personal API keys can be created in Linear under Settings → Security & access. Key resolution order:
 
 1. `--linear-token` flag
 2. `LINEAR_API_KEY` environment variable
