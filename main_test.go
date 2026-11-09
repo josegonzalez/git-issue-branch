@@ -950,6 +950,8 @@ func TestLinearBranchName(t *testing.T) {
 		{"empty username omits segment", "", "ENG-123", "feat: Add login page", "eng-123/add-login-page"},
 		{"username sanitized", "Jose Diaz", "ABC-7", "Fix bug", "jose-diaz/abc-7/fix-bug"},
 		{"lowercase identifier input", "jose", "eng-9", "Simple title", "jose/eng-9/simple-title"},
+		{"empty title omits segment", "jose", "ENG-123", "", "jose/eng-123"},
+		{"empty username and title", "", "ENG-123", "", "eng-123"},
 	}
 
 	for _, tt := range tests {
@@ -966,6 +968,73 @@ func TestLinearBranchName(t *testing.T) {
 			}
 			if strings.HasPrefix(got, "-") || strings.HasSuffix(got, "-") || strings.HasSuffix(got, "/") {
 				t.Errorf("branch name has leading/trailing dash or trailing slash: %q", got)
+			}
+		})
+	}
+}
+
+// TestLinearBranch covers the fallback rules: a URL without a slug warns and
+// omits the slug when the title cannot be fetched, while a bare identifier
+// errors.
+func TestLinearBranch(t *testing.T) {
+	ok := func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"data":{"issue":{"identifier":"ENG-123","title":"feat: do thing"}}}`)
+	}
+	unauthorized := func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}
+	emptyTitle := func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"data":{"issue":{"identifier":"ENG-123","title":"🎉"}}}`)
+	}
+
+	tests := []struct {
+		name        string
+		arg         string
+		token       string
+		handler     http.HandlerFunc
+		want        string
+		wantWarning bool
+		wantErr     bool
+		wantNoFetch bool
+	}{
+		{"url with slug", "https://linear.app/acme/issue/ENG-123/fix-the-login-bug", "", ok, "jose/eng-123/fix-the-login-bug", false, false, true},
+		{"url without slug no token", "https://linear.app/acme/issue/ENG-123", "", ok, "jose/eng-123", true, false, true},
+		{"url without slug fetch fails", "https://linear.app/acme/issue/ENG-123", "lin_api_test", unauthorized, "jose/eng-123", true, false, false},
+		{"url without slug fetch succeeds", "https://linear.app/acme/issue/ENG-123", "lin_api_test", ok, "jose/eng-123/do-thing", false, false, false},
+		{"identifier no token", "ENG-123", "", ok, "", false, true, true},
+		{"identifier fetch fails", "ENG-123", "lin_api_test", unauthorized, "", false, true, false},
+		{"identifier title sanitizes to empty", "ENG-123", "lin_api_test", emptyTitle, "jose/eng-123", true, false, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fetched, tokenResolved := false, false
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				fetched = true
+				tt.handler(w, r)
+			}))
+			defer server.Close()
+
+			got, warning, err := linearBranch(server.URL, tt.arg, "jose", func() string {
+				tokenResolved = true
+				return tt.token
+			})
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("linearBranch() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if got != tt.want {
+				t.Errorf("linearBranch() = %q, want %q", got, tt.want)
+			}
+			if (warning != "") != tt.wantWarning {
+				t.Errorf("linearBranch() warning = %q, wantWarning %v", warning, tt.wantWarning)
+			}
+			if tt.wantNoFetch && fetched {
+				t.Errorf("linearBranch() made a request, want none")
+			}
+			if tt.name == "url with slug" && tokenResolved {
+				t.Errorf("linearBranch() resolved a token for a URL with a slug")
 			}
 		})
 	}
